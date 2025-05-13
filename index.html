@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Generative Art with Fades & Adjacency Rule</title>
+    <style>
+        body {
+            margin: 0; /* Remove default margin */
+            overflow: hidden; /* Prevent scrollbars if canvas is slightly off */
+            background-color: #FFFFFF; /* Ensure body background is white */
+        }
+        canvas {
+            display: block; /* Removes extra space below canvas */
+            background-color: white;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="artCanvas"></canvas>
+
+    <script>
+        // Configuration for the art generation
+        const CONFIG = {
+            LINE_THICKNESS: 10,
+            LINE_COLOR: '#000000', // Black
+            COLORS: { // Master list of all possible colors
+                RED: '#FF0000',
+                YELLOW: '#FFFF00',
+                BLUE: '#0000FF',
+                BLACK: '#000000',
+                WHITE: '#FFFFFF'
+            },
+            FADE_DURATION: 1000, // Milliseconds for fade-in effect
+            LINE_DRAW_DELAY: 100, 
+            RECT_COLOR_DELAY: 50, 
+            RESTART_DELAY: 3000,
+            NUM_HORIZONTAL_LINES: 3,
+            NUM_VERTICAL_LINES: 3,
+            LINE_POSITION_MIN_FRACTION: 0.1, 
+            LINE_POSITION_MAX_FRACTION: 0.9, 
+            COLOR_PROBABILITIES: [ // Weighted probabilities for choosing colors
+                { color: 'WHITE', weight: 45 },
+                { color: 'RED', weight: 13 },
+                { color: 'YELLOW', weight: 13 },
+                { color: 'BLUE', weight: 13 },
+                { color: 'BLACK', weight: 16 }
+            ]
+        };
+
+        let canvas, ctx;
+        let isGenerating = false;
+        // CANVAS_WIDTH and CANVAS_HEIGHT will be set dynamically
+
+        function hexToRgb(hex) {
+            let r = 0, g = 0, b = 0;
+            if (/^#([A-Fa-f0-9]{3}){1,2}$/.test(hex)) {
+                let c = hex.substring(1).split('');
+                if (c.length === 3) c = [c[0], c[0], c[1], c[1], c[2], c[2]];
+                c = '0x' + c.join('');
+                return { r: (c >> 16) & 255, g: (c >> 8) & 255, b: c & 255 };
+            }
+            console.warn("Invalid hex color:", hex, "defaulting to black");
+            return { r: 0, g: 0, b: 0 };
+        }
+
+        window.onload = () => {
+            canvas = document.getElementById('artCanvas');
+            if (!canvas) {
+                console.error("Initialization failed: Canvas not found.");
+                return;
+            }
+            ctx = canvas.getContext('2d');
+            setupCanvasDimensions();
+            startArtGeneration();
+            window.addEventListener('resize', handleResize);
+        };
+
+        function setupCanvasDimensions() {
+            CONFIG.CANVAS_WIDTH = window.innerWidth;
+            CONFIG.CANVAS_HEIGHT = window.innerHeight;
+            if (canvas) {
+                canvas.width = CONFIG.CANVAS_WIDTH;
+                canvas.height = CONFIG.CANVAS_HEIGHT;
+            }
+        }
+
+        function handleResize() {
+            setupCanvasDimensions();
+            if (!isGenerating && canvas && ctx) clearCanvas();
+        }
+
+        function clearCanvas() {
+            if (ctx && canvas) {
+                ctx.fillStyle = CONFIG.COLORS.WHITE;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+            }
+        }
+
+        function generateRandomLinePositions(count, minFraction, maxFraction) {
+            const positions = [];
+            const range = maxFraction - minFraction;
+            for (let i = 0; i < count; i++) {
+                positions.push(Math.random() * range + minFraction);
+            }
+            positions.sort((a, b) => a - b);
+            return positions;
+        }
+
+        async function startArtGeneration() {
+            if (isGenerating) return; 
+            isGenerating = true;
+
+            setupCanvasDimensions();
+            clearCanvas();
+
+            const hLinePositions = generateRandomLinePositions(CONFIG.NUM_HORIZONTAL_LINES, CONFIG.LINE_POSITION_MIN_FRACTION, CONFIG.LINE_POSITION_MAX_FRACTION);
+            const vLinePositions = generateRandomLinePositions(CONFIG.NUM_VERTICAL_LINES, CONFIG.LINE_POSITION_MIN_FRACTION, CONFIG.LINE_POSITION_MAX_FRACTION);
+
+            const hLineDefs = hLinePositions.map(p => ({ y: p * CONFIG.CANVAS_HEIGHT, x1: 0, x2: CONFIG.CANVAS_WIDTH, type: 'h' }));
+            const vLineDefs = vLinePositions.map(p => ({ x: p * CONFIG.CANVAS_WIDTH, y1: 0, y2: CONFIG.CANVAS_HEIGHT, type: 'v' }));
+
+            const allLinesToDraw = [...hLineDefs, ...vLineDefs];
+            shuffleArray(allLinesToDraw);
+            
+            await drawLinesSequentially(allLinesToDraw);
+            
+            const { rects, numGridRows, numGridCols } = calculateFillableRects(hLineDefs, vLineDefs, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT, CONFIG.LINE_THICKNESS);
+            shuffleArray(rects); // Shuffle order of coloring cells
+
+            // Initialize grid to track colors of cells
+            const coloredRectsGrid = Array(numGridRows).fill(null).map(() => Array(numGridCols).fill(null));
+
+            await colorRectsSequentially(rects, coloredRectsGrid, numGridRows, numGridCols);
+            
+            isGenerating = false;
+            setTimeout(startArtGeneration, CONFIG.RESTART_DELAY);
+        }
+        
+        function animateLineFadeIn(line, duration) {
+            return new Promise(resolve => {
+                const startTime = performance.now();
+                const rgbLineColor = hexToRgb(CONFIG.LINE_COLOR);
+                function animationStep(currentTime) {
+                    const elapsedTime = currentTime - startTime;
+                    let alpha = Math.min(elapsedTime / duration, 1);
+                    ctx.beginPath();
+                    ctx.moveTo(line.x1, line.y);
+                    ctx.lineTo(line.x2, line.y);
+                    ctx.strokeStyle = `rgba(${rgbLineColor.r}, ${rgbLineColor.g}, ${rgbLineColor.b}, ${alpha})`;
+                    ctx.lineWidth = CONFIG.LINE_THICKNESS;
+                    ctx.stroke();
+                    if (elapsedTime < duration) requestAnimationFrame(animationStep);
+                    else {
+                        ctx.beginPath(); // Redraw fully opaque at the end
+                        ctx.moveTo(line.x1, line.y);
+                        ctx.lineTo(line.x2, line.y);
+                        ctx.strokeStyle = CONFIG.LINE_COLOR;
+                        ctx.lineWidth = CONFIG.LINE_THICKNESS;
+                        ctx.stroke();
+                        resolve();
+                    }
+                }
+                requestAnimationFrame(animationStep);
+            });
+        }
+
+        async function drawLinesSequentially(linesArray) {
+            for (let i = 0; i < linesArray.length; i++) {
+                const line = linesArray[i];
+                if (line.type === 'h') {
+                    await animateLineFadeIn(line, CONFIG.FADE_DURATION);
+                } else { 
+                    ctx.beginPath();
+                    ctx.moveTo(line.x, line.y1);
+                    ctx.lineTo(line.x, line.y2);
+                    ctx.strokeStyle = CONFIG.LINE_COLOR;
+                    ctx.lineWidth = CONFIG.LINE_THICKNESS;
+                    ctx.stroke();
+                }
+                if (i < linesArray.length - 1) await new Promise(r => setTimeout(r, CONFIG.LINE_DRAW_DELAY));
+            }
+        }
+        
+        function animateRectFadeIn(rect, colorHex, duration) {
+            return new Promise(resolve => {
+                const startTime = performance.now();
+                const { r, g, b } = hexToRgb(colorHex);
+                function animationStep(currentTime) {
+                    const elapsedTime = currentTime - startTime;
+                    let alpha = Math.min(elapsedTime / duration, 1);
+                    ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
+                    ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+                    if (elapsedTime < duration) requestAnimationFrame(animationStep);
+                    else {
+                        ctx.fillStyle = colorHex; // Ensure final full color
+                        ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+                        resolve();
+                    }
+                }
+                requestAnimationFrame(animationStep);
+            });
+        }
+        
+        // Chooses a color from a list of {color, weight} objects
+        function chooseColorRandomlyFromProbabilities(probabilitiesArray) {
+            if (!probabilitiesArray || probabilitiesArray.length === 0) return 'WHITE'; // Fallback
+
+            const totalWeight = probabilitiesArray.reduce((sum, entry) => sum + entry.weight, 0);
+            if (totalWeight === 0) { // If all valid colors have 0 weight
+                 return probabilitiesArray[Math.floor(Math.random() * probabilitiesArray.length)].color;
+            }
+            let randomNum = Math.random() * totalWeight;
+            for (const entry of probabilitiesArray) {
+                if (randomNum < entry.weight) return entry.color;
+                randomNum -= entry.weight;
+            }
+            return probabilitiesArray[probabilitiesArray.length - 1].color; // Fallback
+        }
+
+        // Determines a valid color for a cell based on its neighbors
+        function chooseValidColorForRect(grid_i, grid_j, coloredRectsGrid, numGridRows, numGridCols) {
+            const neighborOffsets = [
+                [-1, -1], [-1, 0], [-1, 1], // Top row (dj, di)
+                [0, -1],           [0, 1],  // Middle row
+                [1, -1],  [1, 0],  [1, 1]   // Bottom row
+            ];
+            const neighborColors = new Set();
+
+            for (const [dj, di] of neighborOffsets) {
+                const ni = grid_i + di; // Neighbor's column index
+                const nj = grid_j + dj; // Neighbor's row index
+
+                if (nj >= 0 && nj < numGridRows && ni >= 0 && ni < numGridCols) {
+                    if (coloredRectsGrid[nj][ni] !== null) { // Check if neighbor has been colored
+                        neighborColors.add(coloredRectsGrid[nj][ni]);
+                    }
+                }
+            }
+
+            // Filter available colors based on neighbors
+            let availableProbabilities = CONFIG.COLOR_PROBABILITIES.filter(p => !neighborColors.has(p.color));
+
+            if (availableProbabilities.length > 0) {
+                return chooseColorRandomlyFromProbabilities(availableProbabilities);
+            } else {
+                // All colors from CONFIG.COLOR_PROBABILITIES are used by neighbors.
+                // This means we cannot pick any of these (R,Y,B,K,W) without violating the rule IF that color is a neighbor.
+                // Since all are neighbors, we are stuck. Default to WHITE.
+                // This might still violate the rule if a neighbor is WHITE, but it's a graceful fallback.
+                console.warn(`Rect (${grid_j},${grid_i}) is over-constrained by neighbors: ${Array.from(neighborColors)}. Defaulting to WHITE.`);
+                return 'WHITE'; 
+            }
+        }
+
+
+        async function colorRectsSequentially(rectsArray, coloredRectsGrid, numGridRows, numGridCols) {
+            for (let i = 0; i < rectsArray.length; i++) {
+                const rect = rectsArray[i]; // rect contains { x, y, width, height, grid_i, grid_j }
+                
+                const chosenColorName = chooseValidColorForRect(rect.grid_i, rect.grid_j, coloredRectsGrid, numGridRows, numGridCols);
+                
+                // Update the grid with the chosen color (or WHITE if stuck)
+                // This ensures subsequent neighbor checks for other cells are accurate.
+                coloredRectsGrid[rect.grid_j][rect.grid_i] = chosenColorName;
+                
+                const colorValueHex = CONFIG.COLORS[chosenColorName];
+
+                // Only animate/paint if not WHITE (unless it's BLACK, which is a valid fill)
+                // If 'WHITE' is chosen (either validly or as fallback), it's not explicitly painted here,
+                // it remains white from the initial clearCanvas.
+                if (chosenColorName !== 'WHITE' || chosenColorName === 'BLACK') { 
+                    await animateRectFadeIn(rect, colorValueHex, CONFIG.FADE_DURATION);
+                }
+                
+                if (i < rectsArray.length - 1) {
+                    await new Promise(r => setTimeout(r, CONFIG.RECT_COLOR_DELAY));
+                }
+            }
+        }
+
+        function calculateFillableRects(hLinesAbs, vLinesAbs, canvasWidth, canvasHeight, lineThickness) {
+            const xCoords = [0, ...vLinesAbs.map(l => l.x).sort((a, b) => a - b), canvasWidth]
+                .filter((v, i, a) => i === 0 || v > a[i-1] + (lineThickness / 2)); 
+            const yCoords = [0, ...hLinesAbs.map(l => l.y).sort((a, b) => a - b), canvasHeight]
+                .filter((v, i, a) => i === 0 || v > a[i-1] + (lineThickness / 2)); 
+
+            const fillableRects = [];
+            const L_HALF = lineThickness / 2;
+            const numGridCols = xCoords.length - 1;
+            const numGridRows = yCoords.length - 1;
+
+            for (let j = 0; j < numGridRows; j++) { // j is grid_j (row index)
+                for (let i = 0; i < numGridCols; i++) { // i is grid_i (column index)
+                    const x1_center = xCoords[i];
+                    const y1_center = yCoords[j];
+                    const x2_center = xCoords[i+1];
+                    const y2_center = yCoords[j+1];
+
+                    const fill_x = (x1_center === 0) ? 0 : x1_center + L_HALF;
+                    const fill_y = (y1_center === 0) ? 0 : y1_center + L_HALF;
+                    const x_end_for_width = (x2_center === canvasWidth) ? canvasWidth : x2_center - L_HALF;
+                    const y_end_for_height = (y2_center === canvasHeight) ? canvasHeight : y2_center - L_HALF;
+                    const fill_w = x_end_for_width - fill_x;
+                    const fill_h = y_end_for_height - fill_y;
+
+                    if (fill_w > lineThickness / 2 && fill_h > lineThickness / 2) { 
+                        fillableRects.push({ x: fill_x, y: fill_y, width: fill_w, height: fill_h, grid_i: i, grid_j: j });
+                    }
+                }
+            }
+            return { rects: fillableRects, numGridRows, numGridCols };
+        }
+        
+        function shuffleArray(array) {
+            for (let i = array.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [array[i], array[j]] = [array[j], array[i]];
+            }
+        }
+    </script>
+</body>
+</html>
